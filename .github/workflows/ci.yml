@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux — clean build (warnings as errors) + test
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clean build with warnings as errors
+        run: |
+          rm -rf .build
+          swift build -Xswiftc -warnings-as-errors
+      - name: Test
+        run: swift test
+
+  apple:
+    name: macOS — compile every scheme for the iOS Simulator
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve package dependencies
+        run: xcodebuild -resolvePackageDependencies
+      - name: Build for a generic iOS Simulator destination
+        run: |
+          set -eo pipefail
+          xcodebuild -list -json > /tmp/schemes.json
+          cat /tmp/schemes.json
+          python3 -c "import json; d=json.load(open('/tmp/schemes.json')); c=d.get('workspace') or d.get('project') or {}; print('\n'.join(c.get('schemes', [])))" > /tmp/schemes.txt
+          cat /tmp/schemes.txt
+          while read -r scheme; do
+            [ -z "$scheme" ] && continue
+            echo "=== building scheme: $scheme"
+            xcodebuild build -scheme "$scheme" -destination 'generic/platform=iOS Simulator'
+          done < /tmp/schemes.txt
