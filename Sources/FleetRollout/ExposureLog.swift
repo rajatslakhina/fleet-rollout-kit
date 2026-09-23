@@ -122,4 +122,13 @@ public actor ExposureLog {
     }
 
     public func bufferedCount() -> Int { buffer.count }
+
+    /// Size of the de-duplication table.
+    ///
+    /// Exposed so the bound on it can actually be asserted. A test that only
+    /// checks `bufferedCount()` proves the *ring* is bounded and says nothing
+    /// about the dictionary beside it, which takes one entry per
+    /// `(flag, variant, reason, documentVersion)` and is the part that grows
+    /// with a long-lived process.
+    func dedupeTableCount() -> Int { lastSeen.count }
 }

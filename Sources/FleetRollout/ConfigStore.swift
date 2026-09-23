@@ -158,6 +158,8 @@ public actor ConfigStore {
     /// Highest document version ever accepted. Never decreases.
     private var versionFloor: Int
     private var inFlight: Task<RefreshOutcome, Never>?
+    private var inFlightGeneration = 0
+    private var nextGeneration = 0
     private var diagnostics = StoreDiagnostics()
 
     public init(
@@ -226,15 +228,22 @@ public actor ConfigStore {
         if let existing = inFlight {
             return await existing.value
         }
+        // The slot is released by the *work*, as its last act, not by the caller
+        // after its own continuation resumes. Releasing it in the caller leaves a
+        // window between the fetch finishing and the caller waking up, during
+        // which a newly arriving refresh joins an already-completed request and
+        // is silently a no-op — which, for a push-triggered kill, is the one
+        // refresh that had to happen.
+        let generation = nextGeneration
+        nextGeneration = SafeMath.addingSaturating(nextGeneration, 1)
         let task = Task<RefreshOutcome, Never> { [knownVersion = current.documentVersion] in
-            await self.performRefresh(knownVersion: knownVersion, budget: nil)
+            let outcome = await self.performRefresh(knownVersion: knownVersion, budget: nil)
+            self.releaseInFlight(generation: generation)
+            return outcome
         }
         inFlight = task
-        let outcome = await task.value
-        // Re-read, do not assume: another caller may already have cleared and
-        // replaced the slot while this continuation was suspended.
-        if inFlight == task { inFlight = nil }
-        return outcome
+        inFlightGeneration = generation
+        return await task.value
     }
 
     /// Launch-time blocking fetch with a hard budget.
@@ -252,6 +261,19 @@ public actor ConfigStore {
     @discardableResult
     public func warmUp(budget: Duration) async -> RefreshOutcome {
         await performRefresh(knownVersion: current.documentVersion, budget: budget)
+    }
+
+    /// Whether a revalidation is parked in the single-flight slot.
+    ///
+    /// Internal, and it exists so the slot's release is assertable at all: a
+    /// test that only counts transport calls cannot tell a released slot from a
+    /// leaked one that nothing happened to collide with.
+    func hasInFlightRequest() -> Bool { inFlight != nil }
+
+    private func releaseInFlight(generation: Int) {
+        // Identity-checked: only the generation that owns the slot may clear it.
+        guard inFlightGeneration == generation else { return }
+        inFlight = nil
     }
 
     private func performRefresh(knownVersion: Int, budget: Duration?) async -> RefreshOutcome {
@@ -320,12 +342,6 @@ public actor ConfigStore {
                 try await Task.sleep(for: budget)
                 throw ConfigStoreError.budgetExhausted
             }
-            // `next()` cannot actually return `nil` here — exactly two tasks
-            // were just added and this is the first call — but the API's
-            // return type is `Element?`, and the alternative to this guard is
-            // a force-unwrap, which the rest of this package refuses to write
-            // on principle. Left unreachable and documented rather than faked
-            // reachable by a test that would misrepresent what it proves.
             guard let first = try await group.next() else {
                 throw ConfigStoreError.budgetExhausted
             }

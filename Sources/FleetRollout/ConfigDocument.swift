@@ -43,13 +43,18 @@ public struct RolloutRule: Hashable, Sendable, Codable {
 
 public struct FlagDefinition: Hashable, Sendable, Codable {
     public let key: String
-    /// Per-flag bucketing salt.
+    /// Per-flag rotation handle for bucketing.
     ///
-    /// Two independent 5% rollouts sharing a salt hit *the same* 5% of devices.
-    /// That population is then permanently over-exposed to every experiment the
-    /// company runs, their crash rate is not the fleet's crash rate, and the
-    /// two rollouts' results are confounded with each other. Distinct salts are
-    /// the whole fix, and `DocumentValidator` flags collisions.
+    /// Decorrelation between flags does **not** depend on this being unique —
+    /// `StableBucketer` hashes the flag key too, so two flags are independent by
+    /// construction. What the salt buys is the ability to *reshuffle one flag's
+    /// population without renaming the flag*, which is what re-running an
+    /// experiment on a fresh split requires.
+    ///
+    /// `DocumentValidator` still reports a shared salt, as a warning rather than
+    /// a defect: it is the signature of a copy-pasted flag definition, and it
+    /// means the next operator who bumps this salt to reshuffle one rollout will
+    /// have to remember that the string is load-bearing somewhere else too.
     public let salt: String
     public let variants: [Variant]
     public let defaultVariantKey: String
@@ -183,7 +188,7 @@ public enum DocumentDefect: Hashable, Sendable, CustomStringConvertible {
         case .emptyPredicateGroup(let flagKey, let ruleID):
             return "flag '\(flagKey)' rule '\(ruleID)' contains an empty all/any group"
         case .sharedSalt(let flagKeys, let salt):
-            return "flags \(flagKeys.joined(separator: ", ")) share bucketing salt '\(salt)'"
+            return "flags \(flagKeys.joined(separator: ", ")) share rotation salt '\(salt)'"
         case .nonPositiveMaxAge(let maxAge):
             return "maxAge \(maxAge) is not positive"
         }
@@ -191,11 +196,11 @@ public enum DocumentDefect: Hashable, Sendable, CustomStringConvertible {
 
     /// Whether this defect must reject the document outright.
     ///
-    /// A shared salt is a real problem but it is a *correlation* problem, not an
+    /// A shared salt is worth surfacing but it is an *operability* smell, not an
     /// ambiguity: the document still resolves to exactly one answer per flag. A
     /// duplicate flag key does not, and a kill switch that resolves ambiguously
-    /// is worse than no kill switch. So the first fails the document and the
-    /// second is a warning surfaced to the dashboard.
+    /// is worse than no kill switch. So the first is a warning on the dashboard
+    /// and the second fails the document.
     public var isFatal: Bool {
         if case .sharedSalt = self { return false }
         return true
@@ -204,12 +209,7 @@ public enum DocumentDefect: Hashable, Sendable, CustomStringConvertible {
 
 public enum DocumentValidator {
 
-    // Returns every defect found. Empty means the document is structurally sound.
-    // A flat accumulation of independent structural checks over one document —
-    // each check is a few lines and none nests into another. Splitting it into
-    // per-check helpers would trade one readable pass over the document for
-    // several, each re-threading `defects`/`seenFlagKeys`/`saltOwners`.
-    // swiftlint:disable:next cyclomatic_complexity function_body_length
+    /// Returns every defect found. Empty means the document is structurally sound.
     public static func defects(in document: ConfigDocument) -> [DocumentDefect] {
         var defects: [DocumentDefect] = []
 
@@ -254,7 +254,7 @@ public enum DocumentValidator {
                     defects.append(.unknownRuleVariant(
                         flagKey: flag.key, ruleID: rule.id, variantKey: rule.variantKey))
                 }
-                if rule.bucketRange.upperBasisPoints < rule.bucketRange.lowerBasisPoints {
+                if rule.bucketRange.isInverted {
                     defects.append(.invertedBucketRange(flagKey: flag.key, ruleID: rule.id))
                 }
                 let depth = rule.predicate.depth()

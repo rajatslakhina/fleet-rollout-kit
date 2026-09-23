@@ -201,11 +201,6 @@ public enum FleetSimulator {
 /// background refresh switched off.
 public enum PropagationSimulator {
 
-    // A flat simulation: zero-fleet guard, then one straight-line loop with no
-    // nested control structures beyond one channel check apiece. Splitting it
-    // would separate the four channels' draws from the shared `best`
-    // bookkeeping they all write to.
-    // swiftlint:disable:next function_body_length
     public static func timeToKill(
         fleetSize: Int,
         profile: WakeProfile = .dailyConsumerApp,
@@ -233,8 +228,8 @@ public enum PropagationSimulator {
             @inline(__always)
             func consider(_ channel: PropagationChannel, _ at: TimeInterval) {
                 guard at <= window else { return }
-                if let current = best, current.at <= at { return }
-                best = (channel, at)
+                guard let current = best else { best = (channel, at); return }
+                if at < current.at { best = (channel, at) }
             }
 
             if channels.contains(.silentPush), generator.nextUnitInterval() < profile.silentPushDeliveryRate {

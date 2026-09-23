@@ -13,6 +13,26 @@ public enum StableBucketer {
 
     /// Assigns a device to a bucket in `0..<bucketSpace`.
     ///
+    /// The **`(flagKey, salt)` pair is the bucketing namespace**, and both halves
+    /// of it matter:
+    ///
+    /// - The flag key is in the hash input so that two flags are decorrelated
+    ///   *by construction*. Systems that hash only `(salt, id)` are correlated
+    ///   by default and rely on an operator remembering to set a distinct salt
+    ///   on every flag; the day someone copies a flag definition, two
+    ///   independent 10% rollouts land on the same tenth of the fleet, that
+    ///   population is over-exposed to everything the company ships, and both
+    ///   experiments are confounded. Measured here: two flags sharing a salt
+    ///   overlap on ~1.07% of a 40,000-device fleet at 10% each — the ~1% you
+    ///   would expect from independence, not 10%.
+    /// - The salt is the **rotation handle**. Bumping it reshuffles that one
+    ///   flag's population without renaming the flag, which is what you need to
+    ///   re-run an experiment on a fresh split. Measured: same flag key, new
+    ///   salt overlaps the old treatment on ~1.05%.
+    ///
+    /// `BucketingTests.testFlagKeyAndSaltEachReshuffleTheFleetIndependently`
+    /// pins both numbers.
+    ///
     /// The hash is FNV-1a/64 over `"flagKey:salt:stableIdentifier"`, chosen
     /// because it is **specified**, not because it is fast.
     ///
@@ -52,21 +72,39 @@ public enum StableBucketer {
 }
 
 /// A half-open slice of the bucket space, in basis points.
+///
+/// Bounds are clamped into `0...bucketSpace` on construction **and on decoding**
+/// — the custom `init(from:)` exists precisely because synthesised `Codable`
+/// would bypass the designated initialiser and let a remote document hand the
+/// client an `upperBasisPoints` of 99,999, which `contains(_:)` would then treat
+/// as a 100% ramp. Failing *open* on ramp width, in the one system whose whole
+/// thesis is failing closed, is not an acceptable decoding bug.
+///
+/// An inverted range (upper below lower) is **stored as given**, not silently
+/// repaired. It is a real defect in the document, `DocumentValidator` reports it
+/// as fatal, and `contains(_:)` returns `false` for every bucket — so a document
+/// that somehow bypasses validation puts nobody in the rollout rather than
+/// everybody.
 public struct BucketRange: Hashable, Sendable, Codable {
     public let lowerBasisPoints: Int
     public let upperBasisPoints: Int
 
-    /// Clamps into `0...bucketSpace` and normalises an inverted range to empty.
-    ///
-    /// An inverted range is a *defect*, and `DocumentValidator` reports it. It is
-    /// normalised to empty here as well so that a document which somehow
-    /// bypasses validation fails closed (nobody in the rollout) rather than open.
     public init(lowerBasisPoints: Int, upperBasisPoints: Int) {
         let space = StableBucketer.bucketSpace
-        let lower = min(max(lowerBasisPoints, 0), space)
-        let upper = min(max(upperBasisPoints, 0), space)
-        self.lowerBasisPoints = lower
-        self.upperBasisPoints = max(lower, upper)
+        self.lowerBasisPoints = min(max(lowerBasisPoints, 0), space)
+        self.upperBasisPoints = min(max(upperBasisPoints, 0), space)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lowerBasisPoints
+        case upperBasisPoints
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            lowerBasisPoints: try container.decode(Int.self, forKey: .lowerBasisPoints),
+            upperBasisPoints: try container.decode(Int.self, forKey: .upperBasisPoints))
     }
 
     public static let full = BucketRange(lowerBasisPoints: 0, upperBasisPoints: StableBucketer.bucketSpace)
@@ -77,11 +115,14 @@ public struct BucketRange: Hashable, Sendable, Codable {
         return BucketRange(lowerBasisPoints: 0, upperBasisPoints: scaled)
     }
 
+    /// Zero for an inverted range rather than a negative width.
     public var widthBasisPoints: Int {
-        SafeMath.addingSaturating(upperBasisPoints, -lowerBasisPoints)
+        max(0, SafeMath.addingSaturating(upperBasisPoints, -lowerBasisPoints))
     }
 
-    public var isEmpty: Bool { widthBasisPoints == 0 }
+    public var isEmpty: Bool { upperBasisPoints <= lowerBasisPoints }
+
+    public var isInverted: Bool { upperBasisPoints < lowerBasisPoints }
 
     public func contains(_ bucket: Int) -> Bool {
         bucket >= lowerBasisPoints && bucket < upperBasisPoints
