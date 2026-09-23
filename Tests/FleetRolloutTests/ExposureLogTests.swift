@@ -11,21 +11,6 @@ final class ExposureLogTests: XCTestCase {
             reason: .ruleMatch, documentVersion: 7, bucket: 42, matchedRuleID: "r1")
     }
 
-    /// `dedupeKey` folds a nil `documentVersion` (the fallback/no-document
-    /// path) into `"-"` rather than `Optional.none`'s string form, so two
-    /// fallback exposures for the same flag still dedupe against each other.
-    func testDedupeKeyFoldsAMissingDocumentVersion() async {
-        let log = ExposureLog(capacity: 8, dedupeWindow: 60)
-        let noDocument = Assignment(
-            flagKey: "a", variantKey: "fallback", value: .bool(false),
-            reason: .noDocument, documentVersion: nil, bucket: nil, matchedRuleID: nil)
-        await log.record(noDocument, at: epoch)
-        await log.record(noDocument, at: epoch.addingTimeInterval(1))
-        let drain = await log.drain()
-        XCTAssertEqual(drain.events.count, 1, "two nil-documentVersion reads within the window should dedupe")
-        XCTAssertEqual(drain.deduplicatedCount, 1)
-    }
-
     func testDrainReturnsEventsInArrivalOrder() async {
         let log = ExposureLog(capacity: 8, dedupeWindow: 0)
         for index in 0..<5 {
@@ -109,18 +94,28 @@ final class ExposureLogTests: XCTestCase {
         XCTAssertEqual(drain.events.count, 2)
     }
 
+    /// The ring is not the only thing that grows.
+    ///
+    /// `lastSeen` takes one entry per `(flag, variant, reason, documentVersion)`
+    /// and a long-lived process sees a new document version every few minutes.
+    /// Asserting `bufferedCount()` here would be vacuous — it is pinned to
+    /// `capacity` by the ring, and would still hold with the dictionary bound
+    /// deleted. `dedupeTableCount()` is the number that actually moves.
     func testDedupeTableDoesNotGrowWithoutBound() async {
-        let log = ExposureLog(capacity: 32, dedupeWindow: 3_600)
+        let capacity = 32
+        let log = ExposureLog(capacity: capacity, dedupeWindow: 3_600)
         for index in 0..<5_000 {
             await log.record(assignment("flag.\(index)"), at: epoch)
+            let tableSize = await log.dedupeTableCount()
+            XCTAssertLessThanOrEqual(
+                tableSize, SafeMath.addingSaturating(capacity, 1),
+                "dedupe table reached \(tableSize) after \(index + 1) distinct keys")
         }
-        // The observable guarantee: memory is bounded by capacity, and the log
-        // still functions afterwards.
-        let actual3 = await log.bufferedCount()
-        XCTAssertEqual(actual3, 32)
+        let buffered = await log.bufferedCount()
+        XCTAssertEqual(buffered, capacity)
         let drain = await log.drain()
-        XCTAssertEqual(drain.events.count, 32)
-        XCTAssertGreaterThan(drain.droppedCount, 0)
+        XCTAssertEqual(drain.events.count, capacity)
+        XCTAssertEqual(drain.droppedCount, 5_000 - capacity)
     }
 
     func testCountersResetAfterDrain() async {

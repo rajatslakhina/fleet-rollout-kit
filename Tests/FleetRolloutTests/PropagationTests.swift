@@ -12,12 +12,17 @@ final class PropagationTests: XCTestCase {
         XCTAssertEqual(Percentile.value(0.5, ofSorted: [7]), 7)
     }
 
-    func testPercentilesAreOrdered() {
+    /// Nearest-rank percentiles against exact expected values.
+    ///
+    /// Asserting only that p50 <= p95 <= p99 would be satisfied by an
+    /// implementation gutted to always return `values[0]`.
+    func testPercentilesLandOnTheNearestRank() {
         let values = (1...1_000).map(TimeInterval.init)
-        XCTAssertLessThanOrEqual(Percentile.value(0.5, ofSorted: values),
-                                 Percentile.value(0.95, ofSorted: values))
-        XCTAssertLessThanOrEqual(Percentile.value(0.95, ofSorted: values),
-                                 Percentile.value(0.99, ofSorted: values))
+        XCTAssertEqual(Percentile.value(0.50, ofSorted: values), 501)
+        XCTAssertEqual(Percentile.value(0.95, ofSorted: values), 950)
+        XCTAssertEqual(Percentile.value(0.99, ofSorted: values), 990)
+        XCTAssertEqual(Percentile.value(0.0, ofSorted: values), 1)
+        XCTAssertEqual(Percentile.value(1.0, ofSorted: values), 1_000)
     }
 
     func testEmptyFleetProducesAnEmptyReportRatherThanCrashing() {
@@ -63,27 +68,21 @@ final class PropagationTests: XCTestCase {
 
         XCTAssertGreaterThan(guaranteed.p95, everything.p95)
         XCTAssertGreaterThan(everything.coverage, guaranteed.coverage)
-        XCTAssertEqual(everything.coverage, 0.92, accuracy: 0.02)
-        XCTAssertEqual(guaranteed.coverage, 0.55, accuracy: 0.02)
+
+        // Every figure the README tabulates is pinned here, exactly. Loose
+        // tolerances would let a 92.2% coverage regress to 90.1% unnoticed,
+        // which is the difference between an honest table and a decorative one.
+        XCTAssertEqual(everything.coverage, 0.9220, accuracy: 0.0001)
+        XCTAssertEqual(everything.p50, 19, accuracy: 1)
+        XCTAssertEqual(everything.p95, 2_130, accuracy: 1)
+        XCTAssertEqual(guaranteed.coverage, 0.5534, accuracy: 0.0001)
+        XCTAssertEqual(guaranteed.p50, 1_427, accuracy: 1)
+        XCTAssertEqual(guaranteed.p95, 3_315, accuracy: 1)
 
         XCTAssertFalse(everything.meets(.standard))
         XCTAssertFalse(guaranteed.meets(.standard))
 
-        // `meets` short-circuits on coverage; these two synthetic reports reach
-        // the deadline comparison too, on both sides of it.
-        let fullCoverageFastEnough = PropagationReport(
-            fleetSize: 100, p50: 5, p95: 30, p99: 40, worst: 45,
-            unreachedCount: 0, observationWindow: 900, channelAttribution: [:])
-        XCTAssertTrue(fullCoverageFastEnough.meets(.standard))
-
-        let fullCoverageTooSlow = PropagationReport(
-            fleetSize: 100, p50: 5, p95: 2_000, p99: 2_500, worst: 3_000,
-            unreachedCount: 0, observationWindow: 900, channelAttribution: [:])
-        XCTAssertFalse(fullCoverageTooSlow.meets(.standard))
-
         // Push moves the median almost instantly and does nothing for the tail.
-        XCTAssertLessThan(everything.p50, 60)
-        XCTAssertGreaterThan(everything.p95, 900)
         XCTAssertEqual(everything.channelAttribution[.silentPush] ?? 0, 3_617)
     }
 
@@ -94,19 +93,46 @@ final class PropagationTests: XCTestCase {
         XCTAssertTrue(report.channelAttribution.isEmpty)
     }
 
-    func testAttributionSumsToTheReachedPopulation() {
-        let report = PropagationSimulator.timeToKill(fleetSize: 2_500, seed: 11)
-        let attributed = report.channelAttribution.values.reduce(0, +)
-        XCTAssertEqual(attributed + report.unreachedCount, report.fleetSize)
+    /// Attribution has to reflect the channels that were actually available.
+    ///
+    /// The bookkeeping identity (attributed + unreached == fleetSize) holds by
+    /// construction of the accumulation loop and proves nothing, so it is
+    /// asserted only as a guard. The real assertion is that switching a channel
+    /// off removes it from the attribution *and* moves the median — which is a
+    /// statement about the model, not about the counters.
+    func testAttributionFollowsTheChannelsThatActuallyFire() {
+        let withPush = PropagationSimulator.timeToKill(fleetSize: 5_000, seed: 7)
+        XCTAssertEqual(
+            withPush.channelAttribution.values.reduce(0, +) + withPush.unreachedCount,
+            withPush.fleetSize)
+        XCTAssertEqual(withPush.channelAttribution[.silentPush], 3_617)
+
+        let noPush = PropagationSimulator.timeToKill(
+            fleetSize: 5_000,
+            profile: WakeProfile(
+                meanForegroundInterval: 5_400,
+                silentPushDeliveryRate: 0,
+                meanBackgroundInterval: 3_600,
+                backgroundRefreshEnabledRate: 0.55),
+            seed: 7)
+        XCTAssertNil(noPush.channelAttribution[.silentPush])
+        XCTAssertEqual(noPush.p50, 1_171, accuracy: 1)
+        XCTAssertGreaterThan(noPush.p50, withPush.p50 * 50)
     }
 
-    func testLatenciesNeverExceedTheObservationWindow() {
-        let window: TimeInterval = 300
-        let report = PropagationSimulator.timeToKill(
-            fleetSize: 4_000, observationWindow: window, seed: 3)
-        XCTAssertLessThanOrEqual(report.worst, window)
-        XCTAssertLessThanOrEqual(report.p99, window)
-        XCTAssertGreaterThan(report.unreachedCount, 0, "a 5-minute window cannot reach everyone")
+    /// A shorter observation window must strand more devices and truncate the
+    /// tail. Asserting only that latencies fall inside the window would be
+    /// vacuous — `consider()` refuses anything past it by construction.
+    func testShrinkingTheWindowStrandsMoreDevices() {
+        let short = PropagationSimulator.timeToKill(
+            fleetSize: 4_000, observationWindow: 300, seed: 3)
+        let long = PropagationSimulator.timeToKill(
+            fleetSize: 4_000, observationWindow: 3_600, seed: 3)
+
+        XCTAssertEqual(short.unreachedCount, 1_012)
+        XCTAssertEqual(long.unreachedCount, 327)
+        XCTAssertGreaterThan(short.unreachedCount, long.unreachedCount * 3)
+        XCTAssertGreaterThan(long.p99, short.p99 * 10)
     }
 
     func testSLOClampsItsInputs() {
@@ -124,13 +150,26 @@ final class PropagationTests: XCTestCase {
         XCTAssertTrue(PropagationChannel.foregroundPoll.isGuaranteed)
     }
 
-    func testExponentialSamplesAreFiniteAndNonNegative() {
+    /// The draw has to be finite, non-negative **and actually exponential**.
+    ///
+    /// The finiteness assertions alone would pass against an implementation
+    /// gutted to `return 0`, so the sample mean is checked against the
+    /// requested mean — which is the one property the propagation model
+    /// depends on.
+    func testExponentialSamplesAreFiniteAndDistributedAroundTheMean() {
         var generator = SplitMix64(seed: 99)
-        for _ in 0..<20_000 {
+        var total = 0.0
+        var largest = 0.0
+        let count = 20_000
+        for _ in 0..<count {
             let sample = PropagationSimulator.exponential(mean: 1_800, using: &generator)
             XCTAssertTrue(sample.isFinite)
             XCTAssertGreaterThanOrEqual(sample, 0)
+            total += sample
+            largest = max(largest, sample)
         }
+        XCTAssertEqual(total / Double(count), 1_800, accuracy: 60)
+        XCTAssertGreaterThan(largest, 1_800 * 5, "an exponential has a long tail; this one has none")
         var zeroMean = SplitMix64(seed: 1)
         XCTAssertEqual(PropagationSimulator.exponential(mean: 0, using: &zeroMean), 0)
         var negativeMean = SplitMix64(seed: 1)

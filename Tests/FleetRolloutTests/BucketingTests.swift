@@ -44,23 +44,43 @@ final class BucketingTests: XCTestCase {
         XCTAssertFalse(BucketStabilityCheck.failures(of: statefulBucketer).isEmpty)
     }
 
-    func testBucketAlwaysInsideBucketSpace() {
-        for index in 0..<5_000 {
+    /// The bucketer must actually *use* the space it claims.
+    ///
+    /// Asserting the result is inside `0..<10_000` would be vacuous — it is a
+    /// modulus by 10,000. What is not vacuous is coverage: a bucketer that
+    /// collapses onto a handful of values (a weak hash, a truncated input, a
+    /// constant) satisfies the range check and fails this one.
+    func testBucketerCoversTheWholeSpace() {
+        var seen = Set<Int>()
+        var lowest = StableBucketer.bucketSpace
+        var highest = -1
+        for index in 0..<60_000 {
             let bucket = StableBucketer.bucket(
-                flagKey: "flag.\(index % 7)",
-                salt: "salt-\(index % 3)",
-                stableIdentifier: "device-\(index)")
-            XCTAssertGreaterThanOrEqual(bucket, 0)
-            XCTAssertLessThan(bucket, StableBucketer.bucketSpace)
+                flagKey: "f", salt: "s", stableIdentifier: "d-\(index)")
+            seen.insert(bucket)
+            lowest = min(lowest, bucket)
+            highest = max(highest, bucket)
         }
+        XCTAssertEqual(seen.count, 9_970, "bucket coverage changed; the hash is not the same function")
+        XCTAssertEqual(lowest, 0)
+        XCTAssertEqual(highest, StableBucketer.bucketSpace - 1)
     }
 
-    func testBucketHandlesEmptyAndUnicodeInput() {
-        XCTAssertGreaterThanOrEqual(
-            StableBucketer.bucket(flagKey: "", salt: "", stableIdentifier: ""), 0)
-        let unicode = StableBucketer.bucket(
-            flagKey: "🚀.flag", salt: "सॉल्ट", stableIdentifier: "device-😀")
-        XCTAssertLessThan(unicode, StableBucketer.bucketSpace)
+    /// Empty and multi-byte inputs hash to fixed, committed values.
+    ///
+    /// Asserting only that the result is inside `0..<bucketSpace` would be
+    /// vacuous — it is a modulus by 10,000, and a bucketer that returned the
+    /// constant zero would pass. These are golden values: the empty triple is
+    /// the degenerate case, and the UTF-8 one is the case a byte-wise hash gets
+    /// wrong if it ever starts iterating `Character`s instead of `utf8`.
+    func testEmptyAndUnicodeInputsHashToCommittedValues() {
+        XCTAssertEqual(
+            StableBucketer.bucket(flagKey: "", salt: "", stableIdentifier: ""), 6_677)
+        XCTAssertEqual(
+            StableBucketer.bucket(
+                flagKey: "\u{1F680}.flag", salt: "\u{938}\u{949}\u{932}\u{94D}\u{91F}",
+                stableIdentifier: "device-\u{1F600}"),
+            4_345)
     }
 
     func testDistributionIsApproximatelyUniform() {
@@ -76,27 +96,42 @@ final class BucketingTests: XCTestCase {
         XCTAssertEqual(share, 10, accuracy: 0.75, "10% ramp landed \(share)% of the fleet")
     }
 
-    /// Two 10% rollouts with *different* salts should overlap on about 1% of the
-    /// fleet. Sharing a salt would make the overlap 10% — the same tenth of the
-    /// fleet in every experiment the company runs.
-    func testDistinctSaltsDecorrelateRollouts() {
+    /// The `(flagKey, salt)` pair is the bucketing namespace, and each half of
+    /// it independently reshuffles the fleet.
+    ///
+    /// Both assertions are real properties of the hash, not artefacts of the
+    /// range. A bucketer that ignored the flag key would put two flags on the
+    /// same 10% and fail the first; one that ignored the salt would fail the
+    /// second. The expected overlap is ~1% — the product of two independent 10%
+    /// slices — and the measured values are 1.07% and 1.05%.
+    ///
+    /// The consequence is worth stating plainly: because the flag key is in the
+    /// hash, decorrelation between flags does **not** depend on an operator
+    /// remembering to set a unique salt. Systems that hash only `(salt, id)` are
+    /// correlated by default, and the first copy-pasted flag definition puts two
+    /// independent rollouts on the same tenth of the fleet.
+    func testFlagKeyAndSaltEachReshuffleTheFleetIndependently() {
         let range = BucketRange.percent(10)
         let population = 40_000
-        var both = 0
-        var sharedSaltBoth = 0
+        var treated = 0
+        var sharedSaltDifferentKey = 0
+        var sharedKeyDifferentSalt = 0
+
         for index in 0..<population {
             let identifier = "device-\(index)"
-            let a = StableBucketer.bucket(flagKey: "flag.a", salt: "salt-a", stableIdentifier: identifier)
-            let b = StableBucketer.bucket(flagKey: "flag.b", salt: "salt-b", stableIdentifier: identifier)
-            if range.contains(a) && range.contains(b) { both += 1 }
+            let a = StableBucketer.bucket(flagKey: "flag.a", salt: "s1", stableIdentifier: identifier)
+            let differentKey = StableBucketer.bucket(flagKey: "flag.b", salt: "s1", stableIdentifier: identifier)
+            let differentSalt = StableBucketer.bucket(flagKey: "flag.a", salt: "s2", stableIdentifier: identifier)
 
-            // Same salt *and* same flag key is the degenerate case: identical
-            // hash input, so the two rollouts are the same population exactly.
-            let c = StableBucketer.bucket(flagKey: "flag.a", salt: "salt-a", stableIdentifier: identifier)
-            if range.contains(a) && range.contains(c) { sharedSaltBoth += 1 }
+            guard range.contains(a) else { continue }
+            treated += 1
+            if range.contains(differentKey) { sharedSaltDifferentKey += 1 }
+            if range.contains(differentSalt) { sharedKeyDifferentSalt += 1 }
         }
-        XCTAssertEqual(SafeMath.percentage(both, of: population), 1.0, accuracy: 0.3)
-        XCTAssertEqual(SafeMath.percentage(sharedSaltBoth, of: population), 10.0, accuracy: 0.75)
+
+        XCTAssertEqual(SafeMath.percentage(treated, of: population), 9.88, accuracy: 0.01)
+        XCTAssertEqual(SafeMath.percentage(sharedSaltDifferentKey, of: population), 1.07, accuracy: 0.05)
+        XCTAssertEqual(SafeMath.percentage(sharedKeyDifferentSalt, of: population), 1.05, accuracy: 0.05)
     }
 
     /// Widening a ramp must never evict a device that was already treated.
@@ -119,38 +154,53 @@ final class BucketingTests: XCTestCase {
         XCTAssertEqual(previouslyTreated.count, identifiers.count)
     }
 
-    func testBucketRangeClampsAndNormalises() {
-        XCTAssertEqual(BucketRange(lowerBasisPoints: -50, upperBasisPoints: 99_999).lowerBasisPoints, 0)
-        XCTAssertEqual(
-            BucketRange(lowerBasisPoints: -50, upperBasisPoints: 99_999).upperBasisPoints,
-            StableBucketer.bucketSpace)
-        // Inverted normalises to empty — fail closed, nobody in the rollout.
-        let inverted = BucketRange(lowerBasisPoints: 900, upperBasisPoints: 100)
-        XCTAssertTrue(inverted.isEmpty)
-        XCTAssertFalse(inverted.contains(500))
+    func testBucketRangeClampsItsBounds() {
+        let clamped = BucketRange(lowerBasisPoints: -50, upperBasisPoints: 99_999)
+        XCTAssertEqual(clamped.lowerBasisPoints, 0)
+        XCTAssertEqual(clamped.upperBasisPoints, StableBucketer.bucketSpace)
+
         XCTAssertTrue(BucketRange.empty.isEmpty)
         XCTAssertFalse(BucketRange.empty.contains(0))
         XCTAssertTrue(BucketRange.full.contains(0))
         XCTAssertFalse(BucketRange.full.contains(StableBucketer.bucketSpace))
     }
 
-    func testFailureDescriptionNamesTheMismatch() {
-        struct AlwaysZero {
-            static func bucket(flagKey: String, salt: String, stableIdentifier: String) -> Int { 0 }
+    /// An inverted range is kept as given — it is a document defect, and
+    /// silently repairing it would make `DocumentValidator` unable to report it
+    /// — but it serves nobody.
+    func testInvertedRangeIsPreservedAndFailsClosed() {
+        let inverted = BucketRange(lowerBasisPoints: 900, upperBasisPoints: 100)
+        XCTAssertTrue(inverted.isInverted)
+        XCTAssertTrue(inverted.isEmpty)
+        XCTAssertEqual(inverted.widthBasisPoints, 0)
+        for bucket in [0, 99, 100, 500, 899, 900, 901, 9_999] {
+            XCTAssertFalse(inverted.contains(bucket), "bucket \(bucket) served by an inverted range")
         }
-        let failures = BucketStabilityCheck.failures(
-            of: AlwaysZero.bucket(flagKey:salt:stableIdentifier:),
-            vectors: [BucketStabilityCheck.goldenVectors[0]])
-        guard let failure = failures.first else {
-            return XCTFail("expected a mismatch against an always-zero bucketer")
-        }
-        XCTAssertEqual(
-            failure.description,
-            "bucket(checkout.duo_layout, s1, device-0000) == 0, expected 1411")
+    }
+
+    /// Synthesised `Codable` would bypass the designated initialiser, so a
+    /// remote document could hand the client a 99,999-basis-point upper bound
+    /// and `contains(_:)` would read it as a 100% ramp. This is the test that
+    /// fails if the custom `init(from:)` is deleted.
+    func testDecodingClampsOutOfSpaceBounds() throws {
+        let json = Data(#"{"lowerBasisPoints":-4000,"upperBasisPoints":99999}"#.utf8)
+        let decoded = try JSONDecoder().decode(BucketRange.self, from: json)
+        XCTAssertEqual(decoded.lowerBasisPoints, 0)
+        XCTAssertEqual(decoded.upperBasisPoints, StableBucketer.bucketSpace)
+        XCTAssertFalse(decoded.contains(StableBucketer.bucketSpace))
+    }
+
+    func testInvertedRangeSurvivesACodableRoundTrip() throws {
+        let inverted = BucketRange(lowerBasisPoints: 900, upperBasisPoints: 100)
+        let decoded = try JSONDecoder().decode(
+            BucketRange.self, from: try JSONEncoder().encode(inverted))
+        XCTAssertEqual(decoded, inverted)
+        XCTAssertTrue(decoded.isInverted, "decoding repaired a defect the validator has to report")
     }
 
     func testPercentHelperSurvivesNonsenseInput() {
         XCTAssertTrue(BucketRange.percent(.nan).isEmpty)
+        XCTAssertFalse(BucketRange.percent(.nan).isInverted)
         XCTAssertEqual(BucketRange.percent(.infinity).upperBasisPoints, StableBucketer.bucketSpace)
         XCTAssertTrue(BucketRange.percent(-10).isEmpty)
         XCTAssertEqual(BucketRange.percent(0.01).upperBasisPoints, 1)

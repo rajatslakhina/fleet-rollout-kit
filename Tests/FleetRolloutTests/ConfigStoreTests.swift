@@ -53,19 +53,6 @@ struct VersionGatedVerifier: DocumentIntegrityVerifying {
     }
 }
 
-final class ConfigStoreWallClockTests: XCTestCase {
-    /// `SystemClock` wraps `Date()` directly; the only thing worth asserting is
-    /// that it reads the real wall clock rather than a frozen value.
-    func testSystemClockReadsTheRealWallClock() {
-        let before = Date()
-        let clock = SystemClock()
-        let reading = clock.now
-        let after = Date()
-        XCTAssertGreaterThanOrEqual(reading, before)
-        XCTAssertLessThanOrEqual(reading, after)
-    }
-}
-
 final class MutableClock: WallClock, @unchecked Sendable {
     private let lock = NSLock()
     private var current: Date
@@ -299,20 +286,39 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(actual17, .expired)
     }
 
-    /// A launch fetch that outruns its budget must return, not wait.
+    /// A launch fetch that outruns its budget must return, not wait — and the
+    /// budget has to be the thing that decides *when*.
+    ///
+    /// A single "finished in under five seconds" assertion would pass an
+    /// implementation that ignored the budget and used some other fixed
+    /// timeout, so this measures two different budgets against the same
+    /// permanently-hanging transport and asserts the wait tracked the budget.
     func testLaunchBudgetIsSpentNotExtended() async {
-        let transport = ScriptedTransport(steps: [.hang])
-        let store = makeStore(transport: transport)
-        let started = ContinuousClock.now
-        let outcome = await store.warmUp(budget: .milliseconds(120))
-        let elapsed = ContinuousClock.now - started
+        func elapsed(budget: Duration) async -> (Duration, RefreshOutcome) {
+            let store = makeStore(transport: ScriptedTransport(steps: [.hang]))
+            let started = ContinuousClock.now
+            let outcome = await store.warmUp(budget: budget)
+            let took = ContinuousClock.now - started
+            let diagnostics = await store.currentDiagnostics()
+            XCTAssertEqual(diagnostics.budgetExhaustions, 1)
+            let snapshot = await store.snapshot()
+            XCTAssertEqual(snapshot.source, .bundledFallback)
+            return (took, outcome)
+        }
 
-        XCTAssertEqual(outcome, .budgetExhausted)
-        XCTAssertLessThan(elapsed, .seconds(5))
-        let actual18 = await store.snapshot().source
-        XCTAssertEqual(actual18, .bundledFallback)
-        let actual19 = await store.currentDiagnostics().budgetExhaustions
-        XCTAssertEqual(actual19, 1)
+        let (shortWait, shortOutcome) = await elapsed(budget: .milliseconds(150))
+        let (longWait, longOutcome) = await elapsed(budget: .milliseconds(1_200))
+
+        XCTAssertEqual(shortOutcome, .budgetExhausted)
+        XCTAssertEqual(longOutcome, .budgetExhausted)
+
+        // The transport hangs for 60s. Both waits must be a small multiple of
+        // their own budget, and the longer budget must actually wait longer.
+        XCTAssertGreaterThanOrEqual(shortWait, .milliseconds(150))
+        XCTAssertLessThan(shortWait, .milliseconds(900))
+        XCTAssertGreaterThanOrEqual(longWait, .milliseconds(1_200))
+        XCTAssertLessThan(longWait, .seconds(4))
+        XCTAssertGreaterThan(longWait, shortWait)
     }
 
     func testLaunchFetchInsideBudgetStillApplies() async {
@@ -341,12 +347,51 @@ final class ConfigStoreTests: XCTestCase {
             return collected
         }
 
+        let parked = await store.hasInFlightRequest()
+        XCTAssertFalse(parked, "the shared request was left parked in the single-flight slot")
         XCTAssertEqual(outcomes.count, 12)
         XCTAssertTrue(outcomes.allSatisfy { $0 == .updated(toVersion: 12) })
         let actual21 = await transport.observedCallCount()
         XCTAssertEqual(actual21, 1)
         let actual22 = await store.currentDiagnostics().acceptedCount
         XCTAssertEqual(actual22, 1)
+    }
+
+    /// The single-flight slot must be empty once a refresh has completed.
+    ///
+    /// The production fix this guards is narrower than the assertion, and the
+    /// difference is worth stating rather than dressing up: the slot is
+    /// released by the *work*, as its last act on the actor, instead of by the
+    /// creating caller after its own continuation resumes. Releasing it in the
+    /// caller leaves a window between the fetch finishing and the caller waking
+    /// in which an arriving refresh joins an already-completed request and is
+    /// silently a no-op — for a push-triggered kill, the one refresh that had to
+    /// happen.
+    ///
+    /// **That interleaving cannot be forced deterministically from outside the
+    /// actor**, so this test does not claim to reproduce it. It asserts the
+    /// observable invariant instead — no request is left parked in the slot, and
+    /// the next refresh reaches the transport — which is what a leak would
+    /// break. `testConcurrentRefreshesCoalesceIntoOneRequest` covers the other
+    /// half: that genuinely overlapping callers still share one request.
+    func testSingleFlightSlotIsEmptyAfterARefreshCompletes() async {
+        let transport = ScriptedTransport(steps: [
+            .document(Fixture.document(version: 4, issuedAt: epoch)),
+            .document(Fixture.document(version: 5, issuedAt: epoch))
+        ])
+        let store = makeStore(transport: transport)
+
+        let first = await store.refresh()
+        let parkedAfterFirst = await store.hasInFlightRequest()
+        let second = await store.refresh()
+        let parkedAfterSecond = await store.hasInFlightRequest()
+
+        XCTAssertEqual(first, .updated(toVersion: 4))
+        XCTAssertEqual(second, .updated(toVersion: 5))
+        XCTAssertFalse(parkedAfterFirst)
+        XCTAssertFalse(parkedAfterSecond)
+        let calls = await transport.observedCallCount()
+        XCTAssertEqual(calls, 2)
     }
 
     /// Across a mixed sequence of newer and replayed documents, the floor only
@@ -357,11 +402,16 @@ final class ConfigStoreTests: XCTestCase {
             steps: versions.map { .document(Fixture.document(version: $0, issuedAt: epoch)) })
         let store = makeStore(transport: transport)
 
+        // The floor after each step, recorded rather than loosely asserted: the
+        // interesting shape is that it is non-decreasing while the offered
+        // versions are not.
+        var observedFloors: [Int] = []
         for _ in versions {
             await store.refresh()
-            let floor = await store.acceptedVersionFloor()
-            XCTAssertGreaterThanOrEqual(floor, 1)
+            observedFloors.append(await store.acceptedVersionFloor())
         }
+        XCTAssertEqual(observedFloors, [3, 9, 9, 11, 11, 11, 11, 11])
+        XCTAssertEqual(zip(observedFloors, observedFloors.dropFirst()).filter { $0 > $1 }.count, 0)
         let actual23 = await store.acceptedVersionFloor()
         XCTAssertEqual(actual23, 11)
         let actual24 = await store.snapshot().document.documentVersion

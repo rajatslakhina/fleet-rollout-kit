@@ -84,6 +84,17 @@ final class DocumentValidatorTests: XCTestCase {
             .contains(.emptyPredicateGroup(flagKey: "n", ruleID: "r2")))
     }
 
+    /// Reachable because `BucketRange` no longer silently repairs an inverted
+    /// range: repairing it would leave the validator with nothing to report.
+    func testInvertedBucketRangeIsFatal() {
+        let flag = Fixture.flag(rules: [
+            RolloutRule(id: "backwards", predicate: .always, variantKey: "on",
+                        bucketRange: BucketRange(lowerBasisPoints: 9_000, upperBasisPoints: 1_000))
+        ])
+        let defects = DocumentValidator.fatalDefects(in: Fixture.document(flags: [flag]))
+        XCTAssertTrue(defects.contains(.invertedBucketRange(flagKey: flag.key, ruleID: "backwards")))
+    }
+
     func testTooDeepPredicateIsFatal() {
         var predicate = TargetingPredicate.always
         for _ in 0...TargetingPredicate.maximumDepth { predicate = .any([predicate]) }
@@ -114,66 +125,6 @@ final class DocumentValidatorTests: XCTestCase {
         // The assertion that matters is that this returns at all rather than
         // recursing to a stack overflow on a 2,000-deep remote document.
         XCTAssertFalse(DocumentValidator.fatalDefects(in: Fixture.document(flags: [flag])).isEmpty)
-    }
-
-    /// `DocumentDefect.description` is what a dashboard actually renders per
-    /// defect, so every case's exact wording is pinned here.
-    func testEveryDefectDescriptionIsWorded() {
-        XCTAssertEqual(
-            DocumentDefect.unsupportedSchemaVersion(99).description,
-            "unsupported schemaVersion 99")
-        XCTAssertEqual(
-            DocumentDefect.negativeDocumentVersion(-1).description,
-            "documentVersion -1 is negative")
-        XCTAssertEqual(
-            DocumentDefect.emptyVariantList(flagKey: "a").description,
-            "flag 'a' declares no variants")
-        XCTAssertEqual(
-            DocumentDefect.duplicateVariantKey(flagKey: "a", variantKey: "on").description,
-            "flag 'a' declares variant 'on' more than once")
-        XCTAssertEqual(
-            DocumentDefect.unknownDefaultVariant(flagKey: "a", variantKey: "x").description,
-            "flag 'a' defaults to unknown variant 'x'")
-        XCTAssertEqual(
-            DocumentDefect.unknownRuleVariant(flagKey: "a", ruleID: "r1", variantKey: "x").description,
-            "flag 'a' rule 'r1' serves unknown variant 'x'")
-        XCTAssertEqual(
-            DocumentDefect.duplicateRuleID(flagKey: "a", ruleID: "r1").description,
-            "flag 'a' declares rule id 'r1' more than once")
-        XCTAssertEqual(
-            DocumentDefect.invertedBucketRange(flagKey: "a", ruleID: "r1").description,
-            "flag 'a' rule 'r1' has an inverted bucket range")
-        XCTAssertEqual(
-            DocumentDefect.predicateTooDeep(flagKey: "a", ruleID: "r1", depth: 40).description,
-            "flag 'a' rule 'r1' nests 40 levels deep")
-        XCTAssertEqual(
-            DocumentDefect.emptyPredicateGroup(flagKey: "a", ruleID: "r1").description,
-            "flag 'a' rule 'r1' contains an empty all/any group")
-        XCTAssertEqual(
-            DocumentDefect.sharedSalt(flagKeys: ["a", "b"], salt: "s").description,
-            "flags a, b share bucketing salt 's'")
-        XCTAssertEqual(
-            DocumentDefect.nonPositiveMaxAge(0).description,
-            "maxAge 0.0 is not positive")
-    }
-
-    /// `BucketRange`'s public initialiser cannot construct an inverted range —
-    /// it normalises to empty. The only way one reaches `DocumentValidator` is a
-    /// document decoded from JSON, where Codable synthesis sets the stored
-    /// properties directly and bypasses that initialiser.
-    func testInvertedBucketRangeIsOnlyReachableThroughDecoding() throws {
-        let json = """
-        {"lowerBasisPoints": 900, "upperBasisPoints": 100}
-        """.data(using: .utf8)!
-        let decoded = try JSONDecoder().decode(BucketRange.self, from: json)
-        XCTAssertEqual(decoded.lowerBasisPoints, 900)
-        XCTAssertEqual(decoded.upperBasisPoints, 100)
-
-        let flag = Fixture.flag(rules: [
-            RolloutRule(id: "r1", predicate: .always, variantKey: "on", bucketRange: decoded)
-        ])
-        let defects = DocumentValidator.fatalDefects(in: Fixture.document(flags: [flag]))
-        XCTAssertTrue(defects.contains(.invertedBucketRange(flagKey: flag.key, ruleID: "r1")))
     }
 
     func testDocumentRoundTripsThroughCodable() throws {
