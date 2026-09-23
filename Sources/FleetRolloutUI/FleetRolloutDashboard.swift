@@ -173,8 +173,10 @@ public struct FleetRolloutDashboard: View {
             Text("Rollout — \(model.primaryFlagKey)")
         } footer: {
             Text(model.killed
-                 ? "Killed. Every flag resolves to the app's compiled-in fallback, ignoring every rule and every bucket."
-                 : "Ramping changes the bucket width only. The salt never changes, so a device already in the treatment never falls out of it as the ramp grows.")
+                 ? "Killed. Every flag resolves to the app's compiled-in fallback, "
+                     + "ignoring every rule and every bucket."
+                 : "Ramping changes the bucket width only. The salt never changes, "
+                     + "so a device already in the treatment never falls out of it as the ramp grows.")
         }
     }
 
@@ -233,7 +235,9 @@ public struct FleetRolloutDashboard: View {
         } header: {
             Text("Why this device got this value")
         } footer: {
-            Text("Every assignment carries its reason, its bucket and the rule id that served it. \"What is the value\" is never the question during an incident; \"why did this device get it\" is.")
+            Text("Every assignment carries its reason, its bucket and the rule id that served it. "
+                 + "\"What is the value\" is never the question during an incident; "
+                 + "\"why did this device get it\" is.")
         }
     }
 
@@ -261,7 +265,8 @@ public struct FleetRolloutDashboard: View {
         } header: {
             Text("Time to kill")
         } footer: {
-            Text("Silent push and background refresh are best-effort by Apple's own documentation. Turn them off above to see the floor the kill switch actually guarantees.")
+            Text("Silent push and background refresh are best-effort by Apple's own documentation. "
+                 + "Turn them off above to see the floor the kill switch actually guarantees.")
         }
     }
 

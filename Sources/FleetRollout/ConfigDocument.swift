@@ -204,7 +204,12 @@ public enum DocumentDefect: Hashable, Sendable, CustomStringConvertible {
 
 public enum DocumentValidator {
 
-    /// Returns every defect found. Empty means the document is structurally sound.
+    // Returns every defect found. Empty means the document is structurally sound.
+    // A flat accumulation of independent structural checks over one document —
+    // each check is a few lines and none nests into another. Splitting it into
+    // per-check helpers would trade one readable pass over the document for
+    // several, each re-threading `defects`/`seenFlagKeys`/`saltOwners`.
+    // swiftlint:disable:next cyclomatic_complexity function_body_length
     public static func defects(in document: ConfigDocument) -> [DocumentDefect] {
         var defects: [DocumentDefect] = []
 

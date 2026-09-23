@@ -11,6 +11,21 @@ final class ExposureLogTests: XCTestCase {
             reason: .ruleMatch, documentVersion: 7, bucket: 42, matchedRuleID: "r1")
     }
 
+    /// `dedupeKey` folds a nil `documentVersion` (the fallback/no-document
+    /// path) into `"-"` rather than `Optional.none`'s string form, so two
+    /// fallback exposures for the same flag still dedupe against each other.
+    func testDedupeKeyFoldsAMissingDocumentVersion() async {
+        let log = ExposureLog(capacity: 8, dedupeWindow: 60)
+        let noDocument = Assignment(
+            flagKey: "a", variantKey: "fallback", value: .bool(false),
+            reason: .noDocument, documentVersion: nil, bucket: nil, matchedRuleID: nil)
+        await log.record(noDocument, at: epoch)
+        await log.record(noDocument, at: epoch.addingTimeInterval(1))
+        let drain = await log.drain()
+        XCTAssertEqual(drain.events.count, 1, "two nil-documentVersion reads within the window should dedupe")
+        XCTAssertEqual(drain.deduplicatedCount, 1)
+    }
+
     func testDrainReturnsEventsInArrivalOrder() async {
         let log = ExposureLog(capacity: 8, dedupeWindow: 0)
         for index in 0..<5 {

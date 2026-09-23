@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="470" viewBox="0 0 980 470" font-family="SF Mono, Menlo, monospace">
+  <rect width="980" height="470" fill="#0f1117"/>
+  <text x="34" y="48" fill="#e6e9ef" font-size="21" font-weight="700">FleetRolloutKit &#8212; gates, measured not claimed</text>
+  <text x="34" y="74" fill="#7d8799" font-size="13">2026-09-23 &#183; Swift 6.2.4 &#183; SwiftLint 0.63.2 &#183; verified again from a clean clone</text>
+
+  <rect x="34" y="102" width="912" height="1" fill="#2a3040"/>
+
+  <text x="34" y="136" fill="#9aa4b8" font-size="13">swift build -Xswiftc -warnings-as-errors</text>
+  <text x="520" y="136" fill="#7fc9a0" font-size="13">0 warnings &#183; 0 errors</text>
+
+  <text x="34" y="172" fill="#9aa4b8" font-size="13">swift test</text>
+  <text x="520" y="172" fill="#7fc9a0" font-size="13">111 tests &#183; 0 failures</text>
+
+  <text x="34" y="208" fill="#9aa4b8" font-size="13">llvm-cov report (FleetRollout library)</text>
+  <text x="520" y="208" fill="#7fc9a0" font-size="13">99.90% lines &#183; 100% functions</text>
+  <text x="520" y="228" fill="#5c657a" font-size="12">1 line documented unreachable &#8212; no force-unwrap alternative</text>
+
+  <text x="34" y="264" fill="#9aa4b8" font-size="13">swiftlint lint --strict</text>
+  <text x="520" y="264" fill="#7fc9a0" font-size="13">0 violations in 14 files</text>
+
+  <text x="34" y="300" fill="#9aa4b8" font-size="13">demo</text>
+  <text x="520" y="300" fill="#7fc9a0" font-size="13">swift run FleetRolloutDemo &#8212; 4 scenarios, real output</text>
+
+  <rect x="34" y="330" width="912" height="1" fill="#2a3040"/>
+
+  <text x="34" y="366" fill="#f2b880" font-size="14" font-weight="700">The number this package exists to produce</text>
+  <text x="34" y="392" fill="#c9d1e0" font-size="13">osVersion &gt;= "27.1" treats 72.4% of a 10,000-device fleet. onTrain(duo) treats 2.1%.</text>
+  <text x="34" y="414" fill="#c9d1e0" font-size="13">A 34.5x over-exposure, on a fleet that closed its downgrade path the same day.</text>
+  <text x="34" y="440" fill="#7fc9a0" font-size="13">The version floor then holds: a replayed pre-kill document is rejected, not resurrected.</text>
+</svg>

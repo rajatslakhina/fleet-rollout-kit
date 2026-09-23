@@ -119,6 +119,21 @@ final class EvaluatorTests: XCTestCase {
         XCTAssertEqual(evaluator.evaluate("a", for: Fixture.device()).reason, .refusedMalformedRule)
     }
 
+    /// Distinct from `testRuleReferencingAMissingVariantDoesNotServeSomeOtherVariant`:
+    /// here no rule matches at all, so evaluation falls through to the flag's
+    /// own default — and the default variant itself does not exist.
+    func testMissingDefaultVariantResolvesConservatively() {
+        let flag = FlagDefinition(
+            key: "a", salt: "s",
+            variants: [Variant(key: "off", value: .bool(false))],
+            defaultVariantKey: "ghost-default",
+            rules: [])
+        let evaluator = Evaluator(document: Fixture.document(flags: [flag]), fallback: .empty)
+        let assignment = evaluator.evaluate("a", for: Fixture.device())
+        XCTAssertEqual(assignment.reason, .refusedMalformedRule)
+        XCTAssertEqual(assignment.variantKey, "fallback")
+    }
+
     func testDuplicateFlagKeyResolvesFirstWins() {
         let document = Fixture.document(flags: [
             FlagDefinition(key: "a", salt: "s1",

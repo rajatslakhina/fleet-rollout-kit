@@ -3,6 +3,12 @@ import XCTest
 
 final class TargetingPredicateTests: XCTestCase {
 
+    func testIsMatchConveniencePropertyReflectsMatchedOnly() {
+        XCTAssertTrue(PredicateMatch.matched.isMatch)
+        XCTAssertFalse(PredicateMatch.notMatched.isMatch)
+        XCTAssertFalse(PredicateMatch.refusedDepthExceeded.isMatch)
+    }
+
     /// The headline bug this package exists to make unexpressible.
     ///
     /// iOS 27.1 shipped only to iPhone Duo. A device on 27.2 never ran it. Under

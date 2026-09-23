@@ -53,6 +53,19 @@ struct VersionGatedVerifier: DocumentIntegrityVerifying {
     }
 }
 
+final class ConfigStoreWallClockTests: XCTestCase {
+    /// `SystemClock` wraps `Date()` directly; the only thing worth asserting is
+    /// that it reads the real wall clock rather than a frozen value.
+    func testSystemClockReadsTheRealWallClock() {
+        let before = Date()
+        let clock = SystemClock()
+        let reading = clock.now
+        let after = Date()
+        XCTAssertGreaterThanOrEqual(reading, before)
+        XCTAssertLessThanOrEqual(reading, after)
+    }
+}
+
 final class MutableClock: WallClock, @unchecked Sendable {
     private let lock = NSLock()
     private var current: Date

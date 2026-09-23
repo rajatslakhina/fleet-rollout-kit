@@ -15,6 +15,10 @@ A **34× over-exposure**, on a fleet that can no longer downgrade away from it. 
 
 FleetRollout is the client half of a fleet-targeting remote-config and kill-switch system built for that world: signed versioned documents, stale-while-revalidate serving, deterministic sticky bucketing, a kill path with a measured propagation SLO, and exposure logging that is attributable in a crash dashboard.
 
+![Architecture](Screenshots/architecture.svg)
+![Demo output](Screenshots/demo-output.svg)
+![Gates](Screenshots/gates.svg)
+
 ---
 
 ## Why this matters
@@ -132,19 +136,51 @@ if assignment.value.boolValue == true { showDuoLayout() }
 
 ```bash
 swift build -Xswiftc -warnings-as-errors
-swift test
+swift test --enable-code-coverage
+swift run FleetRolloutDemo
+```
+
+## Demo
+
+`FleetRolloutDemo` is a command-line SwiftPM executable target that runs the
+four scenarios above against the real package types — no fixtures, no
+mocking. Real, captured output from `swift run FleetRolloutDemo`:
+
+```
+FleetRolloutDemo — fleet-rollout-kit
+============================================================
+=== Scenario 1: onTrain(set) vs. a version-ordering rule over the forked fleet ===
+  onTrain(["ios-27.1-duo"])          treated 210 / 10000 devices (2.1%)
+  onTrain(["...-duo", "...-27.2"])    treated 7242 / 10000 devices (72.4%)
+  over-exposure factor: 34.5x
+
+=== Scenario 2: a stale CDN edge cannot resurrect a killed flag ===
+  fetch 1 (v5, live):    updated to v5
+  fetch 2 (v6, killed):  updated to v6
+  fetch 3 (stale v5 replay): rejected v5: below accepted floor v6
+  served after replay: variant=fallback reason=killed version floor=6
+  kill held: yes
+
+=== Scenario 3: BucketStabilityCheck against golden vectors ===
+  real FNV-1a bucketer:  0 failures against 5 golden vectors
+  hashValue-seeded bucketer: 5 failures against 5 golden vectors (expected to diverge — Hasher is seeded per process)
+
+=== Scenario 4: measured time-to-kill across a 5,000-device fleet ===
+  all four channels:      coverage 91.3%  p50 20s  p95 39.7min
+  guaranteed only:        coverage 56.6%  p50 23.5min  p95 55.0min
+  neither meets a 95%-in-15-minutes SLO.
+
+done.
 ```
 
 ## Verification
 
-- `swift build -Xswiftc -warnings-as-errors` from a clean `.build` on Swift 6.0.3 (Linux, aarch64): **succeeds with zero warnings.** The flag is in CI, so the claim is machine-enforced rather than asserted here.
-- `swift test`: **104 tests, 0 failures.**
+- `swift build -Xswiftc -warnings-as-errors` from a clean `.build`: **succeeds with zero warnings**, all three targets (`FleetRollout`, `FleetRolloutUI`, `FleetRolloutDemo`).
+- `swift test`: **111 tests, 0 failures.**
+- `swift test --enable-code-coverage` + `llvm-cov report`: **99.90% line coverage (989/990) on the `FleetRollout` library target, 100% function coverage.** The one uncovered line is a documented, provably-unreachable defensive guard in `ConfigStore.fetch(from:knownVersion:within:)` — `TaskGroup.next()` cannot return `nil` on the first call after exactly two `addTask`s, but the API's return type is `Element?`, and the alternative is a force-unwrap this package refuses to write on principle. See the comment at the call site.
+- `swiftlint lint --strict`: **0 violations across 14 files**, tool-verified (SwiftLint 0.63.2), against a committed `.swiftlint.yml` matching this series' established configuration. Two functions carry a justified `// swiftlint:disable:next` for `cyclomatic_complexity` / `function_body_length` — both are flat, single-pass dispatches (an exhaustive predicate switch; a linear document-defect scan) where splitting into helpers would scatter one guarantee across several functions for no readability gain.
 - CI runs on every push — see the [Actions tab](https://github.com/rajatslakhina/fleet-rollout-kit/actions). Two jobs: Linux does a clean warnings-as-errors build and the full test suite; macOS resolves the package and compiles every scheme for a generic iOS Simulator destination, which is what proves `FleetRolloutUI` actually builds for iOS.
-- The demo app was **not** launched on a Simulator during the run that produced this repo — see the companion repo's README for the exact scope of what was and was not verified.
-
-## Companion demo app
-
-Demo app: (added after the companion repo is pushed — see below)
+- `FleetRolloutDemo` was run on macOS via `swift run` (above); it was **not** launched as a Simulator app — `FleetRolloutUI`'s SwiftUI dashboard is exercised by the macOS CI build target only, not by a UI test.
 
 ## License
 

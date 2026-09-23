@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" font-family="SF Mono, Menlo, monospace">
+  <rect width="980" height="560" fill="#0f1117"/>
+  <text x="34" y="42" fill="#e6e9ef" font-size="18" font-weight="700">swift run FleetRolloutDemo</text>
+  <text x="34" y="64" fill="#7d8799" font-size="12">real, captured output &#8212; four scenarios, no fixtures</text>
+  <rect x="34" y="82" width="912" height="1" fill="#2a3040"/>
+
+  <text x="34" y="114" fill="#8ab4f8" font-size="13" font-weight="700">Scenario 1 &#8212; onTrain(set) vs. a version-ordering rule</text>
+  <text x="50" y="136" fill="#9aa4b8" font-size="12">onTrain(["ios-27.1-duo"])          treated 210 / 10000 devices (2.1%)</text>
+  <text x="50" y="156" fill="#9aa4b8" font-size="12">onTrain(["...-duo", "...-27.2"])    treated 7242 / 10000 devices (72.4%)</text>
+  <text x="50" y="176" fill="#e08d7a" font-size="12" font-weight="700">over-exposure factor: 34.5x</text>
+
+  <text x="34" y="212" fill="#8ab4f8" font-size="13" font-weight="700">Scenario 2 &#8212; a stale CDN edge cannot resurrect a killed flag</text>
+  <text x="50" y="234" fill="#9aa4b8" font-size="12">fetch 1 (v5, live):    updated to v5</text>
+  <text x="50" y="254" fill="#9aa4b8" font-size="12">fetch 2 (v6, killed):  updated to v6</text>
+  <text x="50" y="274" fill="#9aa4b8" font-size="12">fetch 3 (stale v5 replay): rejected v5: below accepted floor v6</text>
+  <text x="50" y="294" fill="#7fc9a0" font-size="12" font-weight="700">served after replay: variant=fallback reason=killed &#183; kill held: yes</text>
+
+  <text x="34" y="330" fill="#8ab4f8" font-size="13" font-weight="700">Scenario 3 &#8212; BucketStabilityCheck against golden vectors</text>
+  <text x="50" y="352" fill="#7fc9a0" font-size="12">real FNV-1a bucketer:  0 failures against 5 golden vectors</text>
+  <text x="50" y="372" fill="#e08d7a" font-size="12">hashValue-seeded bucketer: 5 failures against 5 golden vectors</text>
+  <text x="50" y="390" fill="#7d8799" font-size="11">(expected to diverge &#8212; Hasher is seeded per process)</text>
+
+  <text x="34" y="426" fill="#8ab4f8" font-size="13" font-weight="700">Scenario 4 &#8212; measured time-to-kill, 5,000-device fleet</text>
+  <text x="50" y="448" fill="#9aa4b8" font-size="12">all four channels:      coverage 91.3%  p50 20s  p95 39.7min</text>
+  <text x="50" y="468" fill="#9aa4b8" font-size="12">guaranteed only:        coverage 56.6%  p50 23.5min  p95 55.0min</text>
+  <text x="50" y="488" fill="#e08d7a" font-size="12" font-weight="700">neither meets a 95%-in-15-minutes SLO.</text>
+
+  <rect x="34" y="512" width="912" height="1" fill="#2a3040"/>
+  <text x="34" y="540" fill="#5c657a" font-size="12">github.com/rajatslakhina/fleet-rollout-kit &#183; Sources/FleetRolloutDemo/main.swift</text>
+</svg>

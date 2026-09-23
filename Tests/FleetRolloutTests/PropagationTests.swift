@@ -69,6 +69,18 @@ final class PropagationTests: XCTestCase {
         XCTAssertFalse(everything.meets(.standard))
         XCTAssertFalse(guaranteed.meets(.standard))
 
+        // `meets` short-circuits on coverage; these two synthetic reports reach
+        // the deadline comparison too, on both sides of it.
+        let fullCoverageFastEnough = PropagationReport(
+            fleetSize: 100, p50: 5, p95: 30, p99: 40, worst: 45,
+            unreachedCount: 0, observationWindow: 900, channelAttribution: [:])
+        XCTAssertTrue(fullCoverageFastEnough.meets(.standard))
+
+        let fullCoverageTooSlow = PropagationReport(
+            fleetSize: 100, p50: 5, p95: 2_000, p99: 2_500, worst: 3_000,
+            unreachedCount: 0, observationWindow: 900, channelAttribution: [:])
+        XCTAssertFalse(fullCoverageTooSlow.meets(.standard))
+
         // Push moves the median almost instantly and does nothing for the tail.
         XCTAssertLessThan(everything.p50, 60)
         XCTAssertGreaterThan(everything.p95, 900)

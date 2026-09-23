@@ -91,6 +91,11 @@ extension TargetingPredicate {
         evaluate(context, depth: 0)
     }
 
+    // A flat, exhaustive switch over the closed `TargetingPredicate` case set —
+    // one branch per case, no nested conditionals. Splitting it into helpers
+    // would scatter a single exhaustiveness guarantee across multiple
+    // functions for no readability gain.
+    // swiftlint:disable:next cyclomatic_complexity
     private func evaluate(_ context: DeviceContext, depth: Int) -> PredicateMatch {
         guard depth < Self.maximumDepth else { return .refusedDepthExceeded }
         let next = SafeMath.addingSaturating(depth, 1)

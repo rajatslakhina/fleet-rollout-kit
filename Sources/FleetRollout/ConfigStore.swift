@@ -320,6 +320,12 @@ public actor ConfigStore {
                 try await Task.sleep(for: budget)
                 throw ConfigStoreError.budgetExhausted
             }
+            // `next()` cannot actually return `nil` here — exactly two tasks
+            // were just added and this is the first call — but the API's
+            // return type is `Element?`, and the alternative to this guard is
+            // a force-unwrap, which the rest of this package refuses to write
+            // on principle. Left unreachable and documented rather than faked
+            // reachable by a test that would misrepresent what it proves.
             guard let first = try await group.next() else {
                 throw ConfigStoreError.budgetExhausted
             }

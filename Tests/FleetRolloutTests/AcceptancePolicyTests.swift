@@ -15,6 +15,11 @@ final class AcceptancePolicyTests: XCTestCase {
         let violations = VersionFloorCheck.violations(of: NewestResponseWinsPolicy())
         XCTAssertFalse(violations.isEmpty)
         XCTAssertTrue(violations.contains { $0.offeredVersion == 6 && $0.acceptedFloor == 7 })
+
+        let rollback = violations.first { $0.offeredVersion == 6 && $0.acceptedFloor == 7 }
+        XCTAssertEqual(
+            rollback?.description,
+            "offered v6 against floor v7: accepted=true, expected=false")
     }
 
     func testCheckRejectsAStrictlyGreaterPolicyThatDropsEqualVersions() {

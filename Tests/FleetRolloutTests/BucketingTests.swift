@@ -134,6 +134,21 @@ final class BucketingTests: XCTestCase {
         XCTAssertFalse(BucketRange.full.contains(StableBucketer.bucketSpace))
     }
 
+    func testFailureDescriptionNamesTheMismatch() {
+        struct AlwaysZero {
+            static func bucket(flagKey: String, salt: String, stableIdentifier: String) -> Int { 0 }
+        }
+        let failures = BucketStabilityCheck.failures(
+            of: AlwaysZero.bucket(flagKey:salt:stableIdentifier:),
+            vectors: [BucketStabilityCheck.goldenVectors[0]])
+        guard let failure = failures.first else {
+            return XCTFail("expected a mismatch against an always-zero bucketer")
+        }
+        XCTAssertEqual(
+            failure.description,
+            "bucket(checkout.duo_layout, s1, device-0000) == 0, expected 1411")
+    }
+
     func testPercentHelperSurvivesNonsenseInput() {
         XCTAssertTrue(BucketRange.percent(.nan).isEmpty)
         XCTAssertEqual(BucketRange.percent(.infinity).upperBasisPoints, StableBucketer.bucketSpace)
