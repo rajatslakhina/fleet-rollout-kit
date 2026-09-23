@@ -2,7 +2,7 @@
 
 **On 21 September 2026 the iOS version stopped being a line, and every feature flag written as `osVersion >= "27.1"` quietly started targeting the wrong fleet.**
 
-iOS 27.1 shipped **only** to iPhone Duo. Every other iPhone went from 27.0 straight to 27.2. A device on 27.2 therefore never executed a single line of 27.1's code — and `>= 27.1` matches it anyway. On the same day, Apple closed the downgrade path off iOS 27, so a user who takes a bad build of your app on a bad OS train cannot roll *themselves* out of it. Your remote config is the only way back.
+iOS 27.1 shipped **only** to iPhone Duo. Every other iPhone went from 27.0 straight to 27.2 ([9to5Mac, 21 Sep 2026](https://9to5mac.com/2026/09/21/apple-releases-second-ios-27-2-developer-beta-for-iphone/)). A device on 27.2 therefore never executed a single line of 27.1's code — and `>= 27.1` matches it anyway. On the same day, Apple [closed the downgrade path off iOS 27](https://9to5mac.com/2026/09/21/iphone-users-running-ios-27-can-no-longer-downgrade-to-ios-26/), so a user who takes a bad build of your app on a bad OS train cannot roll *themselves* out of it. Your remote config is the only way back.
 
 Run both rules over the same simulated 10,000-device fleet and the gap is not subtle:
 
@@ -11,13 +11,9 @@ Run both rules over the same simulated 10,000-device fleet and the gap is not su
 | `onTrain(["ios-27.1-duo"])` — set membership | **2.1%** (210 devices) | what you meant |
 | `osVersion >= 27.1` — version ordering | **72.4%** (7,242 devices) | what you shipped |
 
-A **34× over-exposure**, on a fleet that can no longer downgrade away from it. Those numbers come out of `FleetSimulatorTests.testVersionComparisonWouldHaveOverExposedTheFleet`, running the real evaluator over the real fleet generator — not out of a spreadsheet.
+A **34× over-exposure**, on a fleet that can no longer downgrade away from it. Both device counts are asserted exactly — not as loose bounds — in `FleetSimulatorTests.testVersionComparisonWouldHaveOverExposedTheFleet`, which runs the real evaluator over the real fleet generator. A regression from 210 treated devices to 490 fails that test rather than sliding under a `< 5%` assertion.
 
 FleetRollout is the client half of a fleet-targeting remote-config and kill-switch system built for that world: signed versioned documents, stale-while-revalidate serving, deterministic sticky bucketing, a kill path with a measured propagation SLO, and exposure logging that is attributable in a crash dashboard.
-
-![Architecture](Screenshots/architecture.svg)
-![Demo output](Screenshots/demo-output.svg)
-![Gates](Screenshots/gates.svg)
 
 ---
 
@@ -25,7 +21,7 @@ FleetRollout is the client half of a fleet-targeting remote-config and kill-swit
 
 A feature flag client looks like a lookup table and behaves like a distributed system. It has a cache with two different correctness requirements, a replay-attack surface, a deterministic-hashing problem, a propagation SLO it usually cannot meet, and a failure mode — serving a feature you already killed — that nobody notices until it is the incident.
 
-Four decisions in this package are the ones you would actually have to defend in review.
+Four decisions are the ones you would actually have to defend in review.
 
 ### 1. There is no `>=` over OS versions, and you cannot add one
 
@@ -49,13 +45,15 @@ Without that, the kill switch has a hole you cannot see in a unit test. Kill a f
 
 ### 3. Bucketing is FNV-1a, specified, because `hashValue` is seeded per process
 
-`StableBucketer` hashes `"flagKey:salt:stableIdentifier"` with FNV-1a/64 into 10,000 basis points (0.01% resolution — a 0.05% canary is a real ask on a large fleet).
+`StableBucketer` hashes `"flagKey:salt:stableIdentifier"` with FNV-1a/64 into 10,000 basis points — 0.01% resolution, because a 0.05% canary is a real ask on a large fleet and rounding it to "0% or 1%" is a two-order-of-magnitude error in blast radius.
 
 It is deliberately not Swift's `Hasher`. `Hasher` is seeded with a per-process random value, so the same device lands in a different bucket on every cold start: the feature flickers, every experiment reading it is silently invalid, and a user who just crashed in the treatment can land right back in it. **This bug is invisible to the obvious test** — calling the bucketer twice in one process and asserting the results match passes, because within a single process `Hasher` really is deterministic.
 
 So the guard is `BucketStabilityCheck`, which validates a bucketer against golden vectors fixed outside the process. `BucketingTests` runs it three ways: the real bucketer passes; a `hashValue`-based bucketer is asserted to **fail**; and the naive same-process assertion is demonstrated passing for the broken one, so the reason the check exists is visible in the test file.
 
-Related: every flag carries its own salt, and `DocumentValidator` reports collisions. Two 10% rollouts sharing a salt hit the *same* tenth of the fleet — permanently over-exposed, with confounded results and a crash rate that is not the fleet's. `testDistinctSaltsDecorrelateRollouts` asserts the overlap is ~1% with distinct salts and ~10% without.
+The **`(flagKey, salt)` pair** is the bucketing namespace, and both halves earn their place. The flag key is in the hash input so that two flags are decorrelated *by construction*: a system that hashes only `(salt, id)` is correlated by default and relies on an operator remembering a distinct salt everywhere, so the first copy-pasted flag definition puts two independent 10% rollouts on the same tenth of the fleet — permanently over-exposed, with confounded results and a crash rate that is not the fleet's. The salt is then free to be the **rotation handle**: bump it to reshuffle one flag's population without renaming the flag, which is what re-running an experiment on a fresh split needs. `testFlagKeyAndSaltEachReshuffleTheFleetIndependently` pins both: two flags sharing a salt overlap on 1.07% of a 40,000-device fleet, and one flag re-salted overlaps its old treatment on 1.05% — the ~1% of two independent 10% slices, in both directions.
+
+**Rejected:** SipHash via `Hasher(seed:)`. It is a better hash, and Swift gives you no supported way to pin the seed across processes, which makes it exactly the property this needs and cannot have. Also rejected: hashing only `(salt, id)`, which is what most flag SDKs do and which makes decorrelation an operator responsibility rather than a property of the system.
 
 ### 4. Two different consistency answers in one system
 
@@ -63,16 +61,18 @@ Serving a five-minute-stale "feature is on" is fine. Blocking app launch on a co
 
 Serving a stale "feature is on" *after it was killed* is the one thing this system exists to prevent. So the kill path is correctness-first, via the version floor above.
 
-The launch fetch has a hard `Duration` budget that is **spent, not extended** — on expiry the in-flight request is genuinely cancelled, because a launch fetch that outlives its budget is competing for the connection pool with the first screen's own traffic. One wasted request costs less than that contention.
+The launch fetch has a hard `Duration` budget that is **spent, not extended** — on expiry the in-flight request is genuinely cancelled, because a launch fetch that outlives its budget is competing for the connection pool with the first screen's own traffic. One wasted request costs less than that contention. `testLaunchBudgetIsSpentNotExtended` measures two different budgets against the same permanently-hanging transport and asserts the wait tracked the budget, so an implementation that ignored it and used some other fixed timeout fails.
 
-And the SLO is measured, not assumed. `PropagationSimulator` models the four channels with honest delivery rates, and the answer is uncomfortable:
+And the SLO is measured, not assumed. `PropagationSimulator` models the four channels with honest delivery rates, and the answer is uncomfortable (5,000 devices, seed 7, one-hour window):
 
 | Channels | Coverage in 1h | p50 | p95 |
 |---|---|---|---|
 | All four (push + foreground + launch + background refresh) | **92.2%** | 19s | 35.5 min |
-| Guaranteed only (push and background refresh assumed dead) | **55.3%** | 23.8 min | 55.3 min |
+| Guaranteed only (push and background refresh assumed dead) | **55.3%** | 23.8 min | 55.2 min |
 
-**Neither meets a 95%-in-15-minutes SLO.** Silent push carries 3,617 of 5,000 devices in under 30 seconds and then does nothing at all for the tail, because the tail is devices that are not running your app. A kill switch's SLO is bounded by engagement, not by infrastructure. `PropagationChannel.isGuaranteed` encodes which two channels are best-effort by Apple's own documentation, and `testNeitherChannelSetMeetsANaiveKillSwitchSLO` pins both numbers.
+**Neither meets a 95%-in-15-minutes SLO.** Silent push carries 3,617 of 5,000 devices in under 30 seconds and then does nothing at all for the tail, because the tail is devices that are not running your app. A kill switch's SLO is bounded by engagement, not by infrastructure. `PropagationChannel.isGuaranteed` encodes which two channels are best-effort by Apple's own documentation, and `testNeitherChannelSetMeetsANaiveKillSwitchSLO` pins all six of those figures — the coverages to ±0.0001 and the latencies to ±1 second — rather than to tolerances wide enough to hide a regression.
+
+**Rejected:** modelling push as a guaranteed channel and reporting the resulting p95 as the kill SLO. That produces a number under a minute, which is the number teams actually quote, and it is a fiction: APNs content-available delivery is best-effort and rate-limited, and background refresh is scheduled at the system's discretion. Budgeting a kill switch against channels that may never fire is how you find out mid-incident.
 
 ---
 
@@ -83,7 +83,7 @@ And the SLO is measured, not assumed. `PropagationSimulator` models the four cha
 | `BuildTrain`, `DeviceContext` | Identity-based OS train model; the closed set of dimensions a rule may read |
 | `TargetingPredicate` | Depth-bounded targeting language with no version ordering |
 | `ConfigDocument`, `FlagDefinition`, `RolloutRule` | Signed, versioned config schema |
-| `DocumentValidator` | 13 structural defects, split into fatal (ambiguity) and warning (correlation) |
+| `DocumentValidator` | 13 structural defects, split into fatal (ambiguity) and warning (operability) |
 | `StableBucketer`, `BucketRange`, `BucketStabilityCheck` | Deterministic basis-point bucketing and its cross-process stability guard |
 | `Evaluator`, `Assignment`, `EvaluationReason` | Pure evaluation; every answer carries its provenance |
 | `ConfigStore` | Actor: SWR serving, single-flight revalidation, quarantine, launch budget |
@@ -101,14 +101,14 @@ And the SLO is measured, not assumed. `PropagationSimulator` models the four cha
 
 ### Safety
 
-No force-unwraps. Every collection access bounds-checked through `SafeMath.clampedIndex`. Every trapping arithmetic operation reachable from the public API — `Int(Double)` on NaN/infinity/out-of-range, `/` and `%` by zero, `Int.min / -1`, `+`/`*` overflow — routed through saturating helpers, with `Int`-range ceilings derived from `Int.max` rather than 64-bit literals (`Int` is 32-bit on watchOS). `TargetingPredicate.depth()` is computed with an explicit stack rather than by recursion, because the recursive version blows the stack on exactly the pathological remote document it was added to detect. `ExposureLog` is a fixed-capacity ring whose dedupe table is bounded too.
+No force-unwraps anywhere in `Sources/`. Every collection access is bounds-checked — through `SafeMath.clampedIndex` where the index is caller-supplied (`Percentile.value`, the dashboard's device inspector), and by a stated construction invariant otherwise (`ExposureLog`'s ring head is `< capacity` because `capacity >= 1` and the head only ever moves by `(head + 1) % capacity`; `FleetSimulator.makeFleet` guards `!cohorts.isEmpty` before it touches `cohorts[0]`, and `FleetComposition.init` substitutes a default for an empty `appBuilds`). Every trapping arithmetic operation reachable from the public API — `Int(Double)` on NaN/infinity/out-of-range, `/` and `%` by zero, `Int.min / -1`, `+`/`*` overflow — routed through saturating helpers, with `Int`-range ceilings derived from `Int.max` rather than 64-bit literals (`Int` is 32-bit on watchOS). `TargetingPredicate.depth()` is computed with an explicit stack rather than by recursion, because the recursive version blows the stack on exactly the pathological remote document it was added to detect. `BucketRange` has a hand-written `init(from:)` so that decoding cannot bypass its bounds clamp — synthesised `Codable` would let a remote document hand the client a 99,999-basis-point upper bound, and failing *open* on ramp width is not acceptable here. `ExposureLog` is a fixed-capacity ring whose de-duplication table is bounded too, and the test asserts the *table* size rather than the ring's, which is the number that actually moves.
 
 ---
 
 ## Usage
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/fleet-rollout-kit.git", from: "1.0.0")
+.package(url: "https://github.com/rajatslakhina/fleet-rollout-kit.git", from: "1.1.0")
 ```
 
 ```swift
@@ -136,51 +136,21 @@ if assignment.value.boolValue == true { showDuoLayout() }
 
 ```bash
 swift build -Xswiftc -warnings-as-errors
-swift test --enable-code-coverage
-swift run FleetRolloutDemo
-```
-
-## Demo
-
-`FleetRolloutDemo` is a command-line SwiftPM executable target that runs the
-four scenarios above against the real package types — no fixtures, no
-mocking. Real, captured output from `swift run FleetRolloutDemo`:
-
-```
-FleetRolloutDemo — fleet-rollout-kit
-============================================================
-=== Scenario 1: onTrain(set) vs. a version-ordering rule over the forked fleet ===
-  onTrain(["ios-27.1-duo"])          treated 210 / 10000 devices (2.1%)
-  onTrain(["...-duo", "...-27.2"])    treated 7242 / 10000 devices (72.4%)
-  over-exposure factor: 34.5x
-
-=== Scenario 2: a stale CDN edge cannot resurrect a killed flag ===
-  fetch 1 (v5, live):    updated to v5
-  fetch 2 (v6, killed):  updated to v6
-  fetch 3 (stale v5 replay): rejected v5: below accepted floor v6
-  served after replay: variant=fallback reason=killed version floor=6
-  kill held: yes
-
-=== Scenario 3: BucketStabilityCheck against golden vectors ===
-  real FNV-1a bucketer:  0 failures against 5 golden vectors
-  hashValue-seeded bucketer: 5 failures against 5 golden vectors (expected to diverge — Hasher is seeded per process)
-
-=== Scenario 4: measured time-to-kill across a 5,000-device fleet ===
-  all four channels:      coverage 91.3%  p50 20s  p95 39.7min
-  guaranteed only:        coverage 56.6%  p50 23.5min  p95 55.0min
-  neither meets a 95%-in-15-minutes SLO.
-
-done.
+swift test
 ```
 
 ## Verification
 
-- `swift build -Xswiftc -warnings-as-errors` from a clean `.build`: **succeeds with zero warnings**, all three targets (`FleetRollout`, `FleetRolloutUI`, `FleetRolloutDemo`).
-- `swift test`: **111 tests, 0 failures.**
-- `swift test --enable-code-coverage` + `llvm-cov report`: **99.90% line coverage (989/990) on the `FleetRollout` library target, 100% function coverage.** The one uncovered line is a documented, provably-unreachable defensive guard in `ConfigStore.fetch(from:knownVersion:within:)` — `TaskGroup.next()` cannot return `nil` on the first call after exactly two `addTask`s, but the API's return type is `Element?`, and the alternative is a force-unwrap this package refuses to write on principle. See the comment at the call site.
-- `swiftlint lint --strict`: **0 violations across 14 files**, tool-verified (SwiftLint 0.63.2), against a committed `.swiftlint.yml` matching this series' established configuration. Two functions carry a justified `// swiftlint:disable:next` for `cyclomatic_complexity` / `function_body_length` — both are flat, single-pass dispatches (an exhaustive predicate switch; a linear document-defect scan) where splitting into helpers would scatter one guarantee across several functions for no readability gain.
-- CI runs on every push — see the [Actions tab](https://github.com/rajatslakhina/fleet-rollout-kit/actions). Two jobs: Linux does a clean warnings-as-errors build and the full test suite; macOS resolves the package and compiles every scheme for a generic iOS Simulator destination, which is what proves `FleetRolloutUI` actually builds for iOS.
-- `FleetRolloutDemo` was run on macOS via `swift run` (above); it was **not** launched as a Simulator app — `FleetRolloutUI`'s SwiftUI dashboard is exercised by the macOS CI build target only, not by a UI test.
+Stated as what was observed, not as what is expected to happen:
+
+- `swift build -Xswiftc -warnings-as-errors` from a clean `.build` on Swift 6.0.3 (Linux, aarch64): **observed to succeed with zero warnings.** The same flag is in the Linux CI job, so future commits are checked by a machine rather than by this paragraph.
+- `swift test`: **observed at 110 tests, 0 failures.**
+- CI runs on every push and its results are public — see the [Actions tab](https://github.com/rajatslakhina/fleet-rollout-kit/actions). Two jobs: Linux does a clean warnings-as-errors build and the full test suite; macOS resolves the package and compiles every scheme for a generic iOS Simulator destination, which is what checks that `FleetRolloutUI` builds for iOS.
+- The demo app was **not** launched on a Simulator during the run that produced this repository. It was never built by Xcode here and never ran. See the companion repo's README for the exact scope of what was and was not verified.
+
+## Companion demo app
+
+[**rajatslakhina/fleet-rollout-kit-demo-app**](https://github.com/rajatslakhina/fleet-rollout-kit-demo-app) — a SwiftUI app that consumes this package as a version-pinned remote Swift Package dependency and puts the ramp, the kill switch and the propagation model behind three controls.
 
 ## License
 

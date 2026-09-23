@@ -14,7 +14,6 @@ let package = Package(
     targets: [
         .target(name: "FleetRollout"),
         .target(name: "FleetRolloutUI", dependencies: ["FleetRollout"]),
-        .executableTarget(name: "FleetRolloutDemo", dependencies: ["FleetRollout"]),
         .testTarget(name: "FleetRolloutTests", dependencies: ["FleetRollout"])
     ]
 )
